@@ -1,9 +1,11 @@
+import { Toaster } from "@/components/ui/sonner";
 import "./brand.css";
 import "./globals.css";
 
 export const metadata = {
   title: "Rastreador de Precios",
-  description: "Rastrea tus productos favoritos y recibe alertas de cambios de precio.",
+  description:
+    "Rastrea tus productos favoritos y recibe alertas de cambios de precio.",
 };
 
 export default function RootLayout({ children }) {
@@ -11,6 +13,7 @@ export default function RootLayout({ children }) {
     <html lang="en">
       <body>
         {children}
+        <Toaster richColors />
       </body>
     </html>
   );
