@@ -100,7 +100,7 @@ export async function POST(request) {
                 newPrice
               );
 
-              if (emailResult?.success) {
+              if (emailResult.success) {
                 results.alertsSent++;
               }
             }
