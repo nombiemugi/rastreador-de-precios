@@ -1,22 +1,18 @@
-import { sendPriceDropAlert } from "@/lib/email";
-import { createClient } from "@/utils/supabase/server";
 import { NextResponse } from "next/server";
-
-export async function GET() {
-  return NextResponse.json({
-    message: "Price check endpoint hit succesfully. Use POST to trigger.",
-  });
-}
+import { createClient } from "@supabase/supabase-js";
+import { scrapeProduct } from "@/lib/firecrawl";
+import { sendPriceDropAlert } from "@/lib/email";
 
 export async function POST(request) {
   try {
     const authHeader = request.headers.get("authorization");
     const cronSecret = process.env.CRON_SECRET;
 
-    if (authHeader !== `Bearer ${cronSecret}`) {
+    if (!cronSecret || authHeader !== `Bearer ${cronSecret}`) {
       return NextResponse.json({ error: "Unauthorized" }, { status: 401 });
     }
 
+    // Use service role to bypass RLS
     const supabase = createClient(
       process.env.NEXT_PUBLIC_SUPABASE_URL,
       process.env.SUPABASE_SERVICE_ROLE_KEY
@@ -28,7 +24,7 @@ export async function POST(request) {
 
     if (productsError) throw productsError;
 
-    console.log(`Found ${products.length} products to check prices for.`);
+    console.log(`Found ${products.length} products to check`);
 
     const results = {
       total: products.length,
@@ -42,45 +38,61 @@ export async function POST(request) {
       try {
         const productData = await scrapeProduct(product.url);
 
-        if (!productData.currentPrice) {
+        if (!productData?.currentPrice) {
           results.failed++;
           continue;
         }
 
+        // 🔒 Normalize price safely
         const newPrice = parseFloat(
           productData.currentPrice.replace(/[^0-9.-]+/g, "")
         );
-        const oldPrice = parseFloat(product.current_price);
+
+        if (isNaN(newPrice)) {
+          results.failed++;
+          continue;
+        }
+
+        const oldPrice =
+          product.current_price !== null
+            ? parseFloat(product.current_price)
+            : null;
+
+        const currency =
+          productData.currencyCode ?? productData.currency ?? product.currency;
 
         await supabase
           .from("products")
           .update({
             current_price: newPrice,
-            currency: productData.currency || product.currency,
-            name: productData.name || product.name,
-            image_url: productData.imageUrl || product.image_url,
+            currency,
+            name: productData.productName || product.name,
+            image_url: productData.productImageUrl || product.image_url,
             updated_at: new Date().toISOString(),
           })
           .eq("id", product.id);
 
-        if (oldPrice !== newPrice) {
+        // Track updates
+        if (oldPrice === null || oldPrice !== newPrice) {
+          results.updated++;
+        }
+
+        if (oldPrice !== null && oldPrice !== newPrice) {
           await supabase.from("price_history").insert({
             product_id: product.id,
             price: newPrice,
-            currency: productData.currencyCode || product.currency,
+            currency,
           });
 
           results.priceChanges++;
 
+          // 📉 Price dropped → send alert
           if (newPrice < oldPrice) {
-            // Alert
-
             const {
               data: { user },
             } = await supabase.auth.admin.getUserById(product.user_id);
 
             if (user?.email) {
-              //send email
               const emailResult = await sendPriceDropAlert(
                 user.email,
                 product,
@@ -88,16 +100,14 @@ export async function POST(request) {
                 newPrice
               );
 
-              if (emailResult.success) {
+              if (emailResult?.success) {
                 results.alertsSent++;
               }
             }
-
-            results.updated++;
           }
         }
       } catch (error) {
-        console.error(`Error procesando el producto ${product.id}:`, error);
+        console.error(`Error processing product ${product.id}:`, error);
         results.failed++;
       }
     }
@@ -108,7 +118,18 @@ export async function POST(request) {
       results,
     });
   } catch (error) {
-    console.error("Cron Job Error", error);
-    return NextResponse.json({ error: error.message }, { status: 500 });
+    console.error("Cron job error:", error);
+    return NextResponse.json(
+      { error: error.message ?? "Internal server error" },
+      { status: 500 }
+    );
   }
 }
+
+export async function GET() {
+  return NextResponse.json({
+    message: "Price check endpoint is working. Use POST to trigger.",
+  });
+}
+
+//
